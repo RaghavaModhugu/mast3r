@@ -123,6 +123,9 @@ if __name__ == '__main__':
                 success, pr_cam_to_world = run_pnp(query_pts2d, query_pts3d, query_view['intrinsics'],
                                                    distortion=None, mode=args.pnp_mode,
                                                    reprojectionError=reproj_err, img_size=[W, H])
+                # degenerate PnP can report success with a NaN/inf pose; treat it as a failure
+                if success and not np.all(np.isfinite(pr_cam_to_world)):
+                    success, pr_cam_to_world = False, None
 
             if not success:
                 abs_transl_error, abs_angular_error = float('inf'), float('inf')
@@ -140,9 +143,6 @@ if __name__ == '__main__':
     if args.output_label:
         xp_label = args.output_label + '_' + xp_label
 
-    export_results(args.output_dir, xp_label, query_names, poses_pred)
-    print(aggregate_stats(f'{args.scene} ({args.pairs_file})', pose_errors, angular_errors))
-
     os.makedirs(args.output_dir, exist_ok=True)
     raw_path = os.path.join(args.output_dir, f'{args.scene}_raw_errors.csv')
     with open(raw_path, 'w') as f:
@@ -153,3 +153,6 @@ if __name__ == '__main__':
     if args.results_csv:
         row = append_scene_row(args.results_csv, args.scene, pose_errors, angular_errors)
         print('per-scene CSV row:', row)
+
+    print(aggregate_stats(f'{args.scene} ({args.pairs_file})', pose_errors, angular_errors))
+    export_results(args.output_dir, xp_label, query_names, poses_pred)
