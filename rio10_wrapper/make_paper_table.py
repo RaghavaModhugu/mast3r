@@ -45,15 +45,16 @@ def paper_style_row(t_errs, r_errs):
     return n, e_t, e_r, acc10, acc20
 
 
-def print_table(label, n, e_t, e_r, acc10, acc20):
-    header = f'{"method":32s} {"n":>6s} {"e_t(m)":>8s} {"e_r(deg)":>9s} {"10cm,10°(%)":>12s} {"20cm,20°(%)":>12s}'
+def print_table(rows):
+    header = f'{"method":44s} {"n":>6s} {"e_t(m)":>8s} {"e_r(deg)":>9s} {"10cm,10°(%)":>12s} {"20cm,20°(%)":>12s}'
     print(header)
     print('-' * len(header))
-    print(f'{label:32s} {n:6d} {e_t:8.3f} {e_r:9.3f} {acc10:12.1f} {acc20:12.1f}')
+    for label, n, e_t, e_r, acc10, acc20 in rows:
+        print(f'{label:44s} {n:6d} {e_t:8.3f} {e_r:9.3f} {acc10:12.1f} {acc20:12.1f}')
     for name, pt, pr, p10, p20 in PAPER_RIO10_ROWS:
         pt_s = f'{pt:8.3f}' if pt is not None else f'{"N/A":>8s}'
         pr_s = f'{pr:9.3f}' if pr is not None else f'{"N/A":>9s}'
-        print(f'{name:32s} {"-":>6s} {pt_s} {pr_s} {p10:12.1f} {p20:12.1f}')
+        print(f'{name:44s} {"-":>6s} {pt_s} {pr_s} {p10:12.1f} {p20:12.1f}')
 
 
 if __name__ == '__main__':
@@ -65,4 +66,9 @@ if __name__ == '__main__':
 
     t_errs, r_errs = pool_raw_errors(args.output_dir, args.scenes)
     n, e_t, e_r, acc10, acc20 = paper_style_row(t_errs, r_errs)
-    print_table(args.label, n, e_t, e_r, acc10, acc20)
+    ok = np.isfinite(t_errs) & np.isfinite(r_errs)
+    n_s, e_ts, e_rs, acc10_s, acc20_s = paper_style_row(t_errs[ok], r_errs[ok])
+    print_table([
+        (f'{args.label}, all queries', n, e_t, e_r, acc10, acc20),
+        (f'{args.label}, PnP success only', n_s, e_ts, e_rs, acc10_s, acc20_s),
+    ])
