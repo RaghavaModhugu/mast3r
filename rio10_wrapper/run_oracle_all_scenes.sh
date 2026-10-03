@@ -22,11 +22,17 @@ TOPK=10
 QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-4}"  # queries per inference() call; raise on a bigger/freer GPU
 
 mkdir -p "$OUT_DIR" "$OUT_DIR/pairs"
-rm -f "$RESULTS_CSV"
+# RESUME=1 keeps the existing per-scene CSV and skips scenes that already wrote raw_errors.csv
+[ "${RESUME:-0}" = 1 ] || rm -f "$RESULTS_CSV"
 
 for i in $(seq -w 1 10); do
     SCENE="scene$i"
     PAIRS_FILE="$OUT_DIR/pairs/${SCENE}_oracle_pairs.txt"
+
+    if [ -f "$OUT_DIR/${SCENE}_raw_errors.csv" ]; then
+        echo "=== $SCENE: already done, skipping ==="
+        continue
+    fi
 
     echo "=== $SCENE: building oracle pairs ==="
     python "$SCRIPT_DIR/pairs_oracle.py" \
