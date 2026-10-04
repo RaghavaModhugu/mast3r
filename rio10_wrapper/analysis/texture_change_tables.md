@@ -1,5 +1,11 @@
 # Texture / change analysis (oracle run, all 34415 queries, PnP success 75.8%)
 
+## Definitions
+
+- **Texture** = variance of the Laplacian (scipy.ndimage.laplace) of the grayscale query image (540x960 W x H RGB, converted with PIL "L"). Higher = more high-frequency detail; lower = smoother, less textured content.
+- **Change share** = for each query, the fraction of its labelled pixels (instance ID > 0 in the query `*.instances.png`) whose instance ID does not appear in any of its 10 oracle map frames (`*.instances.png` of the mapping subscan). ID 0 (unlabelled) is excluded from both numerator and denominator.
+- **PnP success** = poselib returned a finite pose. **Outliers >10 m** = successful PnP poses with translation error above 10 m (degenerate solutions). Error statistics exclude these.
+
 Median texture (Laplacian variance of grayscale query image), all frames: 20.1
 
 ## Table A: success and error statistics by texture quartile
