@@ -62,13 +62,24 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', required=True, help='dir containing {scene}_raw_errors.csv files')
     parser.add_argument('--scenes', nargs='+', default=[f'scene{i:02d}' for i in range(1, 11)])
     parser.add_argument('--label', default='Ours')
+    parser.add_argument('--csv', default=None, help='also write the table to this CSV path')
     args = parser.parse_args()
 
     t_errs, r_errs = pool_raw_errors(args.output_dir, args.scenes)
     n, e_t, e_r, acc10, acc20 = paper_style_row(t_errs, r_errs)
     ok = np.isfinite(t_errs) & np.isfinite(r_errs)
     n_s, e_ts, e_rs, acc10_s, acc20_s = paper_style_row(t_errs[ok], r_errs[ok])
-    print_table([
+    rows = [
         (f'{args.label}, all queries', n, e_t, e_r, acc10, acc20),
         (f'{args.label}, PnP success only', n_s, e_ts, e_rs, acc10_s, acc20_s),
-    ])
+    ]
+    print_table(rows)
+    if args.csv:
+        with open(args.csv, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['method', 'n', 'e_t_m', 'e_r_deg', 'acc_10cm_10deg_pct', 'acc_20cm_20deg_pct'])
+            for label, cnt, et, er, a10, a20 in rows:
+                w.writerow([label, cnt, f'{et:.3f}', f'{er:.3f}', f'{a10:.1f}', f'{a20:.1f}'])
+            for name, pt, pr, p10, p20 in PAPER_RIO10_ROWS:
+                w.writerow([name, '', '' if pt is None else f'{pt:.3f}', '' if pr is None else f'{pr:.3f}', p10, p20])
+        print('wrote', args.csv)
