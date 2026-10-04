@@ -2,14 +2,16 @@
 
 Median texture (Laplacian variance of grayscale query image), all frames: 20.1
 
-## Table A: success by texture quartile
+## Table A: success and error statistics by texture quartile
 
-| Texture quartile | n | Success | Median change |
-|---|---|---|---|
-| Q1 [0.5-11.8] | 8604 | 67.5% | 1.32% |
-| Q2 [11.8-20.1] | 8603 | 76.0% | 3.04% |
-| Q3 [20.1-60.7] | 8604 | 76.5% | 2.10% |
-| Q4 [60.7-8452.2] | 8604 | 83.1% | 2.22% |
+Error statistics use PnP-successful queries with translation error <= 10 m; outliers are counted separately.
+
+| Texture quartile | n | Success | Outliers >10 m | Median change | Median t (cm) | IQR t (cm) | Std t (cm) | Median r (deg) | IQR r (deg) | Std r (deg) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Q1 [0.5-11.8] | 8604 | 67.5% | 194 | 1.32% | 16.6 | 19.2 | 65.4 | 3.78 | 5.39 | 30.08 |
+| Q2 [11.8-20.1] | 8603 | 76.0% | 81 | 3.04% | 15.4 | 16.8 | 65.2 | 3.09 | 3.53 | 22.33 |
+| Q3 [20.1-60.7] | 8604 | 76.5% | 71 | 2.10% | 13.4 | 16.7 | 61.9 | 2.82 | 2.75 | 23.73 |
+| Q4 [60.7-8452.2] | 8604 | 83.1% | 22 | 2.22% | 10.0 | 12.2 | 57.8 | 2.04 | 2.20 | 21.64 |
 
 ## Table B: success and error statistics by change share
 
