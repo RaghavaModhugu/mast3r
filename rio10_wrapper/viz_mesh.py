@@ -69,6 +69,28 @@ def load_labels_ply(path):
     return {'vertices': vertices, 'vertex_colors': vertex_colors, 'object_id': object_id}
 
 
+def _unreferenced_vertex_indices(obj_path, n_vertices):
+    """
+    trimesh's OBJ loader silently drops any vertex not referenced by at least one face, even with
+    process=False (confirmed directly on scene02/seq02_01: 3 of 79398 raw vertices are never used
+    by an 'f ' line, and trimesh's loaded mesh has exactly 79395 vertices, in the same relative
+    order as the raw file with those 3 rows removed -- process=False only disables vertex
+    merging/cleanup, not this face-reference filtering, which happens during parsing itself). This
+    re-derives the same 0-based indices trimesh dropped, purely from the raw OBJ file's 'f ' lines,
+    so load_labels_ply's rows (one per raw vertex, no such filtering) can be realigned to match.
+    """
+    referenced = np.zeros(n_vertices, dtype=bool)
+    with open(obj_path) as f:
+        for line in f:
+            if not line.startswith('f '):
+                continue
+            for tok in line.split()[1:]:
+                idx = int(tok.split('/')[0])
+                idx = idx - 1 if idx > 0 else n_vertices + idx
+                referenced[idx] = True
+    return np.where(~referenced)[0]
+
+
 def load_instance_names(instances_txt_path):
     """ {id: class_name} """
     names = {}
@@ -111,13 +133,30 @@ def vertex_highlight_colors(base_colors, object_id, highlight_ids, highlight_rgb
 
 
 def _load_side(root, scene, subscan):
+    obj_path = os.path.join(semantic_subscan_dir(root, scene, subscan), 'mesh.obj')
     mesh = load_subscan_mesh(root, scene, subscan)
     labels = load_labels_ply(os.path.join(semantic_subscan_dir(root, scene, subscan), 'labels.ply'))
+
     if len(labels['object_id']) != len(mesh.vertices):
-        raise ValueError(
-            f'{scene}/{subscan}: mesh.obj has {len(mesh.vertices)} vertices but labels.ply has '
-            f'{len(labels["object_id"])} -- expected identical count/order (both must be loaded '
-            f'with process=False). Refusing to use a possibly-desynced labels array.')
+        orphans = _unreferenced_vertex_indices(obj_path, len(labels['object_id']))
+        keep = np.ones(len(labels['object_id']), dtype=bool)
+        keep[orphans] = False
+        if keep.sum() != len(mesh.vertices):
+            raise ValueError(
+                f'{scene}/{subscan}: mesh.obj has {len(mesh.vertices)} vertices, labels.ply has '
+                f'{len(labels["object_id"])}, and removing the {len(orphans)} face-unreferenced '
+                f'vertices found in mesh.obj still leaves {keep.sum()} -- counts should match '
+                f'after that removal (see _unreferenced_vertex_indices). Refusing to use a '
+                f'possibly-desynced labels array.')
+        max_coord_diff = np.abs(labels['vertices'][keep] - np.asarray(mesh.vertices)).max()
+        if max_coord_diff > 1e-3:
+            raise ValueError(
+                f'{scene}/{subscan}: vertex coordinates do not line up after removing '
+                f'face-unreferenced rows (max diff {max_coord_diff}) -- refusing to use a '
+                f'possibly-desynced labels array.')
+        labels['object_id'] = labels['object_id'][keep]
+        labels['vertex_colors'] = labels['vertex_colors'][keep]
+
     names = load_instance_names(os.path.join(semantic_subscan_dir(root, scene, subscan), 'instances.txt'))
     return {
         'mesh': mesh,
