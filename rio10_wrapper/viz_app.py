@@ -126,7 +126,7 @@ def build_app(args, model):
     def on_scene_or_mode_change(scene, pairs_mode, topk, processing_level):
         bundle, msg = load_scene(scene, pairs_mode, topk, processing_level)
         build_visible = _retrieval_build_needed(bundle, pairs_mode, processing_level)
-        rows = _table_rows(bundle, None, None, None, None, 'transl_err_m', True)
+        rows = _table_rows(bundle, None, None, None, None, None, None, 'transl_err_m', True)
         return bundle, msg, gr.update(visible=build_visible), rows, None, None, None
 
     def on_build_retrieval(scene, topk, processing_level, progress=gr.Progress()):
@@ -146,23 +146,28 @@ def build_app(args, model):
             bundle, msg = load_scene(scene, 'retrieval', topk, 'image')
             bundle['retrieval_index'] = index
             msg += f" Index built from {len(index['map_ids'])} map images."
-        rows = _table_rows(bundle, None, None, None, None, 'transl_err_m', True)
+        rows = _table_rows(bundle, None, None, None, None, None, None, 'transl_err_m', True)
         return bundle, msg, gr.update(visible=False), rows
 
-    def _table_rows(bundle, success_filter, min_t, min_chg, min_tex, sort_by, descending):
+    def _table_rows(bundle, success_filter, min_t, min_chg, min_tex, max_t_err, max_ang_err,
+                    sort_by, descending):
         if bundle is None:
             return []
         success_f = None if success_filter in (None, 'any') else success_filter
         rows = qidx.filter_and_sort(bundle['table'], success_filter=success_f,
                                     min_transl_err=min_t or None, min_change_frac=min_chg or None,
-                                    min_texture=min_tex or None, sort_by=sort_by, descending=descending)
+                                    min_texture=min_tex or None, max_transl_err=max_t_err or None,
+                                    max_angular_err=max_ang_err or None, sort_by=sort_by,
+                                    descending=descending)
         def _r(v, n):
             return None if v is None else round(v, n)
         return [[r['image_name'], r['success'], _r(r['transl_err_m'], 3), _r(r['angular_err_deg'], 2),
                 _r(r['texture_lapvar'], 1), _r(r['change_frac'], 3)] for r in rows]
 
-    def on_filter_change(bundle, success_filter, min_t, min_chg, min_tex, sort_by, descending):
-        return _table_rows(bundle, success_filter, min_t, min_chg, min_tex, sort_by, descending)
+    def on_filter_change(bundle, success_filter, min_t, min_chg, min_tex, max_t_err, max_ang_err,
+                         sort_by, descending):
+        return _table_rows(bundle, success_filter, min_t, min_chg, min_tex, max_t_err, max_ang_err,
+                           sort_by, descending)
 
     def on_row_select(bundle, evt: gr.SelectData):
         if bundle is None:
@@ -321,6 +326,13 @@ def build_app(args, model):
                     min_tex_num = gr.Number(label='min texture', value=None)
                     sort_by_dd = gr.Dropdown(['transl_err_m', 'angular_err_deg', 'change_frac', 'texture_lapvar'],
                                              value='transl_err_m', label='sort by')
+                with gr.Row():
+                    max_t_err_num = gr.Number(
+                        label='max transl err for "success" (m)', value=None,
+                        info='Leave blank for pure solver success/fail. Set this (and/or the angular '
+                        'threshold) to also count a solver-"success" pose as a failure once its GT '
+                        'error exceeds the bound -- catches degenerate/inaccurate poses.')
+                    max_ang_err_num = gr.Number(label='max angular err for "success" (deg)', value=None)
                 query_table = gr.Dataframe(
                     headers=['image_name', 'success', 'transl_err_m', 'angular_err_deg', 'texture', 'change_frac'],
                     interactive=False)
@@ -365,9 +377,11 @@ def build_app(args, model):
                                   inputs=[scene_dd, topk_slider, processing_level_radio],
                                   outputs=[scene_state, scene_msg, build_retrieval_btn, query_table])
 
-        filter_inputs = [scene_state, success_filter_dd, min_t_num, min_chg_num, min_tex_num, sort_by_dd]
+        filter_inputs = [scene_state, success_filter_dd, min_t_num, min_chg_num, min_tex_num,
+                        max_t_err_num, max_ang_err_num, sort_by_dd]
         for trigger in [success_filter_dd.change, min_t_num.change, min_chg_num.change,
-                       min_tex_num.change, sort_by_dd.change]:
+                       min_tex_num.change, max_t_err_num.change, max_ang_err_num.change,
+                       sort_by_dd.change]:
             trigger(lambda *a: on_filter_change(*a, True), inputs=filter_inputs, outputs=query_table)
 
         query_table.select(on_row_select, inputs=[scene_state], outputs=[query_state, query_preview, query_stats_md])

@@ -65,12 +65,33 @@ def build_query_table(scene, all_query_ids, output_dir, texture_change):
     return rows
 
 
+def _is_accurate(row, max_transl_err, max_angular_err):
+    """ A run counts as an accurate success only if the solver succeeded AND (when given) stays
+    within both the translation and angular error thresholds -- matching the standard
+    relocalization-benchmark convention (success requires both bounds met; exceeding EITHER one
+    makes it a failure, even if the PnP solver itself reported "success"). max_transl_err=
+    max_angular_err=None (the default) falls back to pure solver success/fail, unchanged from
+    before this threshold support existed. """
+    if row['success'] is not True:
+        return False
+    if max_transl_err is not None and (row['transl_err_m'] is None or row['transl_err_m'] > max_transl_err):
+        return False
+    if max_angular_err is not None and (row['angular_err_deg'] is None or row['angular_err_deg'] > max_angular_err):
+        return False
+    return True
+
+
 def filter_and_sort(table, success_filter=None, min_transl_err=None, min_change_frac=None,
-                    min_texture=None, sort_by='transl_err_m', descending=True, limit=200):
+                    min_texture=None, max_transl_err=None, max_angular_err=None,
+                    sort_by='transl_err_m', descending=True, limit=200):
     """
     success_filter: None/'any' (no filter -- includes never-run queries too), 'success', or
     'failed' (the latter two only match queries that have actually been run; a never-run query's
     success is None, which is neither).
+    max_transl_err/max_angular_err: optional accuracy thresholds (see _is_accurate) that redefine
+    'success' as "solver succeeded AND within these error bounds" -- so 'failed' also catches
+    successful-but-inaccurate poses (e.g. the degenerate low-inlier-ratio cases), not just solver
+    failures. None (default) preserves the original pure solver success/fail classification.
     min_* filters keep only rows with that field >= the threshold (None-valued fields -- either
     never computed, or never run -- are excluded by a non-None min_* filter, since there's
     nothing to compare).
@@ -78,9 +99,9 @@ def filter_and_sort(table, success_filter=None, min_transl_err=None, min_change_
     """
     rows = table
     if success_filter == 'success':
-        rows = [r for r in rows if r['success'] is True]
+        rows = [r for r in rows if _is_accurate(r, max_transl_err, max_angular_err)]
     elif success_filter == 'failed':
-        rows = [r for r in rows if r['success'] is False]
+        rows = [r for r in rows if r['success'] is not None and not _is_accurate(r, max_transl_err, max_angular_err)]
     if min_transl_err is not None:
         rows = [r for r in rows if r['transl_err_m'] is not None and r['transl_err_m'] >= min_transl_err]
     if min_change_frac is not None:
