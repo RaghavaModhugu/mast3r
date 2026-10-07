@@ -6,6 +6,7 @@
 # Retriever.__call__ which always does self-retrieval. No existing mast3r file is modified; we
 # just call the public pieces of Retriever (self.model, self.asmk) directly.
 import argparse
+import gc
 import os
 import numpy as np
 import torch
@@ -31,7 +32,46 @@ from mast3r.retrieval.model import extract_local_features
 from rio10_dataset import map_subscan, query_subscan, list_frame_ids, color_path
 
 
-def build_retrieval_pairs(root, scene, retrieval_model_path, backbone_weights_path, topk, device='cuda'):
+def _extract_local_features_chunked(model, image_paths, imsize, device, chunk_size=500):
+    """
+    mast3r.retrieval.model.extract_local_features (a core mast3r file we can't edit) appends one
+    descriptor tensor per image to a plain Python list for the ENTIRE call, with nothing freed
+    until a single torch.cat at the very end, and builds a fresh 8-worker DataLoader that stays
+    alive for that whole call too. For a ~4700-5500 image scene this is enough to OOM-kill a
+    long-running process that already holds a model in memory (confirmed directly: the viz app's
+    server was killed mid-extraction, both before and after reusing the backbone model -- the
+    second time at 94.7% through just the map-image pass alone).
+
+    Calling extract_local_features once per chunk instead bounds each call's internal growing list
+    and DataLoader-worker lifetime to chunk_size images: the chunk's workers are torn down and its
+    list is freed as soon as that call returns, before the next chunk starts, instead of all of it
+    staying resident for the full image set. ids are offset per chunk to remain valid GLOBAL
+    indices into image_paths (extract_local_features itself only ever returns chunk-local 0..N-1
+    ids, since it enumerates whatever list it's given).
+    """
+    feats, ids = [], []
+    for start in range(0, len(image_paths), chunk_size):
+        chunk = image_paths[start:start + chunk_size]
+        feat, local_ids = extract_local_features(model, chunk, imsize, tocpu=True, device=device)
+        feats.append(feat.numpy())
+        ids.append(local_ids.numpy() + start)
+        del feat, local_ids
+        gc.collect()
+        if device != 'cpu' and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return np.concatenate(feats, axis=0), np.concatenate(ids, axis=0)
+
+
+def build_retrieval_pairs(root, scene, retrieval_model_path, backbone_weights_path, topk,
+                          device='cuda', backbone=None):
+    """
+    backbone: an already-loaded AsymmetricMASt3R instance to reuse instead of loading a fresh one
+    from backbone_weights_path. Pass this when calling from a long-running process that already
+    holds a model in memory (e.g. the viz app) -- loading a second full model instance alongside
+    it is what OOM-killed the viz app's on-demand retrieval-index build in practice (confirmed:
+    the server process was killed mid-extraction on this node's memory cap). backbone_weights_path
+    is still required and used as a fallback when backbone is None (the normal CLI path below).
+    """
     map_ids = list_frame_ids(root, scene, map_subscan(scene))
     query_ids = list_frame_ids(root, scene, query_subscan(scene))
     map_paths = [color_path(root, fid) for fid in map_ids]
@@ -43,17 +83,18 @@ def build_retrieval_pairs(root, scene, retrieval_model_path, backbone_weights_pa
     # Passing our own already-loaded backbone (same architecture, loaded from our local base
     # checkpoint) skips that lookup entirely -- Retriever only loads non-backbone weights
     # (prewhiten/projector/postwhiten) from the retrieval checkpoint on top of it.
-    backbone = AsymmetricMASt3R.from_pretrained(backbone_weights_path).to(device)
+    if backbone is None:
+        backbone = AsymmetricMASt3R.from_pretrained(backbone_weights_path).to(device)
     retriever = Retriever(retrieval_model_path, backbone=backbone, device=device)
 
-    db_feat, db_ids = extract_local_features(retriever.model, map_paths, retriever.imsize,
-                                              tocpu=True, device=retriever.device)
-    db_feat, db_ids = db_feat.numpy(), db_ids.numpy()
+    db_feat, db_ids = _extract_local_features_chunked(retriever.model, map_paths, retriever.imsize,
+                                                       retriever.device)
     asmk_dataset = retriever.asmk.build_ivf(db_feat, db_ids)
+    del db_feat, db_ids
+    gc.collect()
 
-    q_feat, q_ids = extract_local_features(retriever.model, query_paths, retriever.imsize,
-                                           tocpu=True, device=retriever.device)
-    q_feat, q_ids = q_feat.numpy(), q_ids.numpy()
+    q_feat, q_ids = _extract_local_features_chunked(retriever.model, query_paths, retriever.imsize,
+                                                     retriever.device)
     _, ranked_query_ids, ranks, _ = asmk_dataset.query_ivf(q_feat, q_ids)
 
     k = min(topk, len(map_ids))

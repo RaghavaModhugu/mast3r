@@ -102,7 +102,8 @@ def build_app(args, model):
             return None, 'No --retrieval_model configured at launch; cannot build on demand.', gr.update(visible=True)
         progress(0, desc=f'Building ASMK retrieval index for {scene} (~1-3 min)...')
         query_ids, pairs = pairs_retrieval.build_retrieval_pairs(
-            args.root, scene, args.retrieval_model, args.weights, topk, device=args.device)
+            args.root, scene, args.retrieval_model, args.weights, topk, device=args.device,
+            backbone=model)  # reuse the already-loaded model -- a second full instance OOM-killed this
         pairs_retrieval.write_pairs_file(retrieval_pairs_path(args.pairs_dir, scene), query_ids, pairs)
         bundle, msg = load_scene(scene, 'retrieval', topk)
         rows = _table_rows(bundle, None, None, None, None, 'transl_err_m', True)
