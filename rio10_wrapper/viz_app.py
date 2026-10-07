@@ -23,7 +23,7 @@ import numpy as np
 from mast3r.model import AsymmetricMASt3R
 from dust3r_visloc.evaluation import get_pose_error
 
-from rio10_dataset import VislocRIO10, map_subscan, query_subscan, list_frame_ids
+from rio10_dataset import VislocRIO10, map_subscan, query_subscan, list_frame_ids, color_path
 import pairs_oracle
 import pairs_retrieval
 import viz_query_index as qidx
@@ -77,35 +77,75 @@ def build_app(args, model):
     fast_nn_params = dict(device=args.device, dist='dot', block_size=2**13)
     texture_change = qidx.load_texture_change_features(args.texture_change_csv)
 
-    def load_scene(scene, pairs_mode, topk):
-        if pairs_mode == 'oracle':
-            pairs_path = ensure_oracle_pairs(args.root, args.pairs_dir, scene, topk)
-        else:
-            pairs_path = retrieval_pairs_path(args.pairs_dir, scene)
-            if not os.path.isfile(pairs_path):
-                return None, f'No retrieval pairs for {scene} yet -- click "Build retrieval index".'
+    def load_scene(scene, pairs_mode, topk, processing_level):
+        """
+        'scene' level: unchanged original behavior -- a full scene-wide pairs file (oracle:
+        built on demand, cheap; retrieval: must already exist or be built via the button) drives
+        VislocRIO10 and every query's neighbors are precomputed up front.
 
-        dataset = VislocRIO10(args.root, scene, pairs_path, topk=topk)
+        'image' level: VislocRIO10 is built with pairs_file=None (query_ids listed directly, no
+        neighbor precomputation at all). Oracle neighbors are computed per-image on demand in
+        on_run_matching using map_ids/map_centers/map_forwards cached here once per scene (cheap:
+        pure pose arithmetic). Retrieval neighbors need a database index built once per scene
+        (unavoidable -- a retrieval index needs a database to search) via the same "Build
+        retrieval index" button, but that button now builds ONLY the map-side index here (no
+        query-side extraction at all, no pairs file), cached into the returned bundle and reused
+        for however many individual images the user picks.
+        """
+        if processing_level == 'scene':
+            if pairs_mode == 'oracle':
+                pairs_path = ensure_oracle_pairs(args.root, args.pairs_dir, scene, topk)
+            else:
+                pairs_path = retrieval_pairs_path(args.pairs_dir, scene)
+                if not os.path.isfile(pairs_path):
+                    return None, f'No retrieval pairs for {scene} yet -- click "Build retrieval index".'
+            dataset = VislocRIO10(args.root, scene, pairs_path, topk=topk)
+        else:
+            dataset = VislocRIO10(args.root, scene, pairs_file=None, topk=topk)
         dataset.set_resolution(model)
+
         mesh_bundle = vmesh.build_scene_meshes(args.root, scene)
         table = qidx.build_query_table(scene, dataset.query_ids, args.output_dir, texture_change)
-        return {'dataset': dataset, 'mesh_bundle': mesh_bundle, 'table': table}, f'{scene}: {len(dataset)} queries loaded.'
+        bundle = {'dataset': dataset, 'mesh_bundle': mesh_bundle, 'table': table,
+                 'processing_level': processing_level, 'retrieval_index': None}
 
-    def on_scene_or_mode_change(scene, pairs_mode, topk):
-        bundle, msg = load_scene(scene, pairs_mode, topk)
-        build_visible = (pairs_mode == 'retrieval' and bundle is None)
+        if processing_level == 'image':
+            map_ids = list_frame_ids(args.root, scene, map_subscan(scene))
+            map_centers, map_forwards = pairs_oracle.load_all_centers_forwards(args.root, map_ids)
+            bundle.update(map_ids=map_ids, map_centers=map_centers, map_forwards=map_forwards)
+
+        return bundle, f'{scene}: {len(dataset)} queries loaded ({processing_level}-level).'
+
+    def _retrieval_build_needed(bundle, pairs_mode, processing_level):
+        if pairs_mode != 'retrieval':
+            return False
+        if processing_level == 'scene':
+            return bundle is None  # load_scene already returned None iff no pairs file exists yet
+        return bundle is not None and bundle.get('retrieval_index') is None
+
+    def on_scene_or_mode_change(scene, pairs_mode, topk, processing_level):
+        bundle, msg = load_scene(scene, pairs_mode, topk, processing_level)
+        build_visible = _retrieval_build_needed(bundle, pairs_mode, processing_level)
         rows = _table_rows(bundle, None, None, None, None, 'transl_err_m', True)
         return bundle, msg, gr.update(visible=build_visible), rows, None, None, None
 
-    def on_build_retrieval(scene, topk, progress=gr.Progress()):
+    def on_build_retrieval(scene, topk, processing_level, progress=gr.Progress()):
         if not args.retrieval_model:
-            return None, 'No --retrieval_model configured at launch; cannot build on demand.', gr.update(visible=True)
-        progress(0, desc=f'Building ASMK retrieval index for {scene} (~1-3 min)...')
-        query_ids, pairs = pairs_retrieval.build_retrieval_pairs(
-            args.root, scene, args.retrieval_model, args.weights, topk, device=args.device,
-            backbone=model)  # reuse the already-loaded model -- a second full instance OOM-killed this
-        pairs_retrieval.write_pairs_file(retrieval_pairs_path(args.pairs_dir, scene), query_ids, pairs)
-        bundle, msg = load_scene(scene, 'retrieval', topk)
+            return None, 'No --retrieval_model configured at launch; cannot build on demand.', gr.update(visible=True), []
+        if processing_level == 'scene':
+            progress(0, desc=f'Building ASMK retrieval index + pairs for {scene} (~1-3 min)...')
+            query_ids, pairs = pairs_retrieval.build_retrieval_pairs(
+                args.root, scene, args.retrieval_model, args.weights, topk, device=args.device,
+                backbone=model)  # reuse the loaded model -- a second full instance OOM-killed this
+            pairs_retrieval.write_pairs_file(retrieval_pairs_path(args.pairs_dir, scene), query_ids, pairs)
+            bundle, msg = load_scene(scene, 'retrieval', topk, 'scene')
+        else:
+            progress(0, desc=f'Building ASMK database index for {scene} (map images only, faster)...')
+            index = pairs_retrieval.build_database_index(
+                args.root, scene, args.retrieval_model, args.weights, device=args.device, backbone=model)
+            bundle, msg = load_scene(scene, 'retrieval', topk, 'image')
+            bundle['retrieval_index'] = index
+            msg += f" Index built from {len(index['map_ids'])} map images."
         rows = _table_rows(bundle, None, None, None, None, 'transl_err_m', True)
         return bundle, msg, gr.update(visible=False), rows
 
@@ -137,13 +177,29 @@ def build_app(args, model):
         stats += f"texture={tex if tex is None else round(tex,1)}  change_frac={chg if chg is None else round(chg,3)}"
         return qid, np.array(view['rgb']), stats
 
-    def on_run_matching(bundle, qid, point_conf_thr, pixel_tol, seed_stride):
+    def on_run_matching(bundle, qid, pairs_mode, topk, point_conf_thr, pixel_tol, seed_stride):
         if bundle is None or qid is None:
             return None, [], 'Pick a scene and a query first.'
         dataset = bundle['dataset']
-        idx = dataset.query_ids.index(qid)
-        views = dataset[idx]
-        query_view, map_views = views[0], views[1:]
+
+        if bundle['processing_level'] == 'scene':
+            idx = dataset.query_ids.index(qid)
+            views = dataset[idx]
+            query_view, map_views = views[0], views[1:]
+        else:
+            query_view = dataset._load_view(qid)
+            if pairs_mode == 'oracle':
+                qcenter, qforward = pairs_oracle.load_center_and_forward(args.root, qid)
+                neighbor_ids = pairs_oracle.rank_single_query(
+                    qcenter, qforward, bundle['map_ids'], bundle['map_centers'], bundle['map_forwards'],
+                    int(topk))
+            else:
+                if bundle.get('retrieval_index') is None:
+                    return None, [], 'Retrieval index not built yet -- click "Build retrieval index".'
+                neighbor_ids = pairs_retrieval.query_single_image(
+                    bundle['retrieval_index'], color_path(args.root, qid), int(topk))
+            map_views = [dataset._load_view(mid) for mid in neighbor_ids]
+
         neighbor_matches = vmatch.match_query_against_neighbors(
             query_view, map_views, model, args.device, fast_nn_params,
             point_conf_thr=point_conf_thr, pixel_tol=pixel_tol, seed_stride=int(seed_stride))
@@ -250,6 +306,7 @@ def build_app(args, model):
         with gr.Row():
             scene_dd = gr.Dropdown(SCENES, value='scene01', label='Scene')
             pairs_mode_dd = gr.Radio(['oracle', 'retrieval'], value='oracle', label='Retrieval mode')
+            processing_level_radio = gr.Radio(['scene', 'image'], value='scene', label='Processing level')
             topk_slider = gr.Slider(1, 10, value=10, step=1, label='topk')
             scene_msg = gr.Markdown()
         build_retrieval_btn = gr.Button('Build retrieval index for this scene (~1-3 min)', visible=False)
@@ -297,13 +354,15 @@ def build_app(args, model):
             prior_model3d = gr.Model3D(label='Prior (mapping scan)', height=600)
             current_model3d = gr.Model3D(label='Current (rescan / query)', height=600)
 
-        scene_inputs = [scene_dd, pairs_mode_dd, topk_slider]
+        scene_inputs = [scene_dd, pairs_mode_dd, topk_slider, processing_level_radio]
         scene_or_mode_outputs = [scene_state, scene_msg, build_retrieval_btn, query_table,
                                  prior_model3d, current_model3d, query_state]
-        for trigger in [scene_dd.change, pairs_mode_dd.change, topk_slider.change]:
+        for trigger in [scene_dd.change, pairs_mode_dd.change, topk_slider.change,
+                       processing_level_radio.change]:
             trigger(on_scene_or_mode_change, inputs=scene_inputs, outputs=scene_or_mode_outputs)
 
-        build_retrieval_btn.click(on_build_retrieval, inputs=[scene_dd, topk_slider],
+        build_retrieval_btn.click(on_build_retrieval,
+                                  inputs=[scene_dd, topk_slider, processing_level_radio],
                                   outputs=[scene_state, scene_msg, build_retrieval_btn, query_table])
 
         filter_inputs = [scene_state, success_filter_dd, min_t_num, min_chg_num, min_tex_num, sort_by_dd]
@@ -314,7 +373,8 @@ def build_app(args, model):
         query_table.select(on_row_select, inputs=[scene_state], outputs=[query_state, query_preview, query_stats_md])
 
         run_match_btn.click(on_run_matching,
-                            inputs=[scene_state, query_state, point_conf_slider, pixel_tol_slider, seed_stride_slider],
+                            inputs=[scene_state, query_state, pairs_mode_dd, topk_slider,
+                                   point_conf_slider, pixel_tol_slider, seed_stride_slider],
                             outputs=[match_state, neighbor_gallery, match_msg])
 
         pnp_inputs = [match_state, confidence_slider, pnp_mode_dd, reproj_err_slider, pnp_max_points_slider]

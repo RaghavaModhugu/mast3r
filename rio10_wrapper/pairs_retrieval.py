@@ -62,36 +62,70 @@ def _extract_local_features_chunked(model, image_paths, imsize, device, chunk_si
     return np.concatenate(feats, axis=0), np.concatenate(ids, axis=0)
 
 
-def build_retrieval_pairs(root, scene, retrieval_model_path, backbone_weights_path, topk,
-                          device='cuda', backbone=None):
-    """
-    backbone: an already-loaded AsymmetricMASt3R instance to reuse instead of loading a fresh one
-    from backbone_weights_path. Pass this when calling from a long-running process that already
-    holds a model in memory (e.g. the viz app) -- loading a second full model instance alongside
-    it is what OOM-killed the viz app's on-demand retrieval-index build in practice (confirmed:
-    the server process was killed mid-extraction on this node's memory cap). backbone_weights_path
-    is still required and used as a fallback when backbone is None (the normal CLI path below).
-    """
-    map_ids = list_frame_ids(root, scene, map_subscan(scene))
-    query_ids = list_frame_ids(root, scene, query_subscan(scene))
-    map_paths = [color_path(root, fid) for fid in map_ids]
-    query_paths = [color_path(root, fid) for fid in query_ids]
-
+def _get_retriever(retrieval_model_path, backbone_weights_path, device, backbone=None):
     # Retriever.__init__ defaults to AsymmetricMASt3R.from_pretrained(ckpt_args.pretrained), but
     # that field is a training-time-only internal checkpoint name ("finalmast3r") baked into the
     # released retrieval checkpoint, not resolvable here (not a local file, not a real HF repo).
     # Passing our own already-loaded backbone (same architecture, loaded from our local base
     # checkpoint) skips that lookup entirely -- Retriever only loads non-backbone weights
     # (prewhiten/projector/postwhiten) from the retrieval checkpoint on top of it.
+    #
+    # backbone: an already-loaded AsymmetricMASt3R instance to reuse instead of loading a fresh
+    # one from backbone_weights_path. Pass this when calling from a long-running process that
+    # already holds a model in memory (e.g. the viz app) -- loading a second full model instance
+    # alongside it is what OOM-killed the viz app's on-demand retrieval-index build in practice
+    # (confirmed: the server process was killed mid-extraction on this node's memory cap).
     if backbone is None:
         backbone = AsymmetricMASt3R.from_pretrained(backbone_weights_path).to(device)
-    retriever = Retriever(retrieval_model_path, backbone=backbone, device=device)
+    return Retriever(retrieval_model_path, backbone=backbone, device=device)
 
+
+def build_database_index(root, scene, retrieval_model_path, backbone_weights_path, device='cuda',
+                         backbone=None):
+    """
+    Image-level mode's scene-wide (but query-independent) step: builds the ASMK index from the
+    MAPPING subscan's images only. This part is unavoidably scene-level -- a retrieval index needs
+    a database to search -- but unlike build_retrieval_pairs it never touches the query images, so
+    it costs roughly half as much and, crucially, doesn't need to be redone per query: cache the
+    returned dict (e.g. in the viz app's scene_state) and reuse it for query_single_image() calls
+    on however many individual query images the user actually picks.
+    """
+    map_ids = list_frame_ids(root, scene, map_subscan(scene))
+    map_paths = [color_path(root, fid) for fid in map_ids]
+    retriever = _get_retriever(retrieval_model_path, backbone_weights_path, device, backbone)
     db_feat, db_ids = _extract_local_features_chunked(retriever.model, map_paths, retriever.imsize,
                                                        retriever.device)
     asmk_dataset = retriever.asmk.build_ivf(db_feat, db_ids)
     del db_feat, db_ids
     gc.collect()
+    return {'retriever': retriever, 'asmk_dataset': asmk_dataset, 'map_ids': map_ids}
+
+
+def query_single_image(index_bundle, image_path, topk):
+    """ Image-level mode's per-query step: extracts local features for ONE query image and ranks
+    it against index_bundle['asmk_dataset'] (built once per scene by build_database_index).
+    Returns the topk map ids, nearest first. """
+    retriever = index_bundle['retriever']
+    feat, ids = extract_local_features(retriever.model, [image_path], retriever.imsize,
+                                       tocpu=True, device=retriever.device)
+    feat, ids = feat.numpy(), ids.numpy()
+    _, _, ranks, _ = index_bundle['asmk_dataset'].query_ivf(feat, ids)
+    k = min(topk, len(index_bundle['map_ids']))
+    db_indices = np.asarray(ranks[0])[:k]
+    return [index_bundle['map_ids'][int(j)] for j in db_indices]
+
+
+def build_retrieval_pairs(root, scene, retrieval_model_path, backbone_weights_path, topk,
+                          device='cuda', backbone=None):
+    """ Scene-level mode: builds the database index (see build_database_index) AND precomputes
+    ranked neighbors for every query image in the scene in one pass, for writing to a pairs file
+    that the bulk pipeline (run_visloc_rio10.py) can consume. """
+    query_ids = list_frame_ids(root, scene, query_subscan(scene))
+    query_paths = [color_path(root, fid) for fid in query_ids]
+
+    index = build_database_index(root, scene, retrieval_model_path, backbone_weights_path,
+                                 device=device, backbone=backbone)
+    retriever, asmk_dataset, map_ids = index['retriever'], index['asmk_dataset'], index['map_ids']
 
     q_feat, q_ids = _extract_local_features_chunked(retriever.model, query_paths, retriever.imsize,
                                                      retriever.device)

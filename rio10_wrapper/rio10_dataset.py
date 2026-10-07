@@ -70,7 +70,14 @@ def list_frame_ids(root, scene, subscan):
 
 
 class VislocRIO10(BaseVislocDataset):
-    def __init__(self, root, scene, pairs_file, topk=10):
+    def __init__(self, root, scene, pairs_file=None, topk=10):
+        """
+        pairs_file=None supports "image-level" callers (the viz app) that compute a query's
+        neighbors on demand rather than from a precomputed scene-wide pairs file: self.query_ids
+        is populated directly from the query subscan's frame list, self.pairs stays empty, and
+        __getitem__ is unusable (raises) since it depends on self.pairs -- such callers must use
+        _load_view(frame_id) directly for both the query and whatever neighbor ids they computed.
+        """
         super().__init__()
         self.root = root
         self.scene = scene
@@ -81,15 +88,18 @@ class VislocRIO10(BaseVislocDataset):
         self._camera_cache = {}
 
         self.pairs = {}
-        self.query_ids = []
-        with open(pairs_file) as f:
-            for line in f:
-                parts = line.split()
-                if not parts:
-                    continue
-                qid, mids = parts[0], parts[1:]
-                self.pairs[qid] = mids
-                self.query_ids.append(qid)
+        if pairs_file is None:
+            self.query_ids = list_frame_ids(root, scene, query_subscan(scene))
+        else:
+            self.query_ids = []
+            with open(pairs_file) as f:
+                for line in f:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    qid, mids = parts[0], parts[1:]
+                    self.pairs[qid] = mids
+                    self.query_ids.append(qid)
 
     def __len__(self):
         return len(self.query_ids)

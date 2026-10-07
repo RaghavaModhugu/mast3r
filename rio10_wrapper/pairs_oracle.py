@@ -36,6 +36,36 @@ def load_center_and_forward(root, frame_id):
     return center, forward
 
 
+def load_all_centers_forwards(root, frame_ids):
+    """ Loads (center, forward) for every frame id -- pure pose arithmetic, cheap even for the
+    largest scenes (confirmed: ~10K frames in a fraction of a second). Shared by both the
+    scene-level bulk builder (build_oracle_pairs) and the image-level on-demand path
+    (rank_single_query), so a scene's map-side arrays can be computed once and reused per image. """
+    centers = np.zeros((len(frame_ids), 3))
+    forwards = np.zeros((len(frame_ids), 3))
+    for i, fid in enumerate(frame_ids):
+        centers[i], forwards[i] = load_center_and_forward(root, fid)
+    return centers, forwards
+
+
+def rank_single_query(query_center, query_forward, map_ids, map_centers, map_forwards,
+                      topk, angle_weight=1.0):
+    """
+    Image-level oracle ranking: scores ONE query's (center, forward) against an already-loaded
+    set of map centers/forwards (e.g. cached once per scene via load_all_centers_forwards) and
+    returns the topk map ids, nearest first. Same distance+angle score as build_oracle_pairs,
+    just for a single query instead of the whole scene's queries at once.
+    """
+    dist = np.linalg.norm(map_centers - query_center[None, :], axis=-1)
+    cos_sim = np.clip(map_forwards @ query_forward, -1.0, 1.0)
+    angle = np.arccos(cos_sim)
+    score = dist + angle_weight * angle
+    k = min(topk, len(map_ids))
+    part = np.argpartition(score, kth=k - 1)[:k]
+    order = part[np.argsort(score[part])]
+    return [map_ids[j] for j in order]
+
+
 def build_oracle_pairs(root, scene, topk, angle_weight=1.0, chunk_size=500):
     """
     angle_weight: meters of position-distance penalty per radian of viewing-direction mismatch.
@@ -46,15 +76,8 @@ def build_oracle_pairs(root, scene, topk, angle_weight=1.0, chunk_size=500):
     map_ids = list_frame_ids(root, scene, map_subscan(scene))
     query_ids = list_frame_ids(root, scene, query_subscan(scene))
 
-    def load_all(frame_ids):
-        centers = np.zeros((len(frame_ids), 3))
-        forwards = np.zeros((len(frame_ids), 3))
-        for i, fid in enumerate(frame_ids):
-            centers[i], forwards[i] = load_center_and_forward(root, fid)
-        return centers, forwards
-
-    map_centers, map_forwards = load_all(map_ids)
-    query_centers, query_forwards = load_all(query_ids)
+    map_centers, map_forwards = load_all_centers_forwards(root, map_ids)
+    query_centers, query_forwards = load_all_centers_forwards(root, query_ids)
 
     k = min(topk, len(map_ids))
     pairs = {}
