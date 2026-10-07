@@ -32,7 +32,6 @@ import viz_mesh as vmesh
 import viz_match_plot as vplot
 
 SCENES = [f'scene{i:02d}' for i in range(1, 11)]
-CAM_SIZE = 0.12
 
 
 def get_args_parser():
@@ -116,8 +115,10 @@ def build_app(args, model):
         rows = qidx.filter_and_sort(bundle['table'], success_filter=success_f,
                                     min_transl_err=min_t or None, min_change_frac=min_chg or None,
                                     min_texture=min_tex or None, sort_by=sort_by, descending=descending)
-        return [[r['image_name'], r['success'], round(r['transl_err_m'], 3), round(r['angular_err_deg'], 2),
-                r['texture_lapvar'], r['change_frac']] for r in rows]
+        def _r(v, n):
+            return None if v is None else round(v, n)
+        return [[r['image_name'], r['success'], _r(r['transl_err_m'], 3), _r(r['angular_err_deg'], 2),
+                _r(r['texture_lapvar'], 1), _r(r['change_frac'], 3)] for r in rows]
 
     def on_filter_change(bundle, success_filter, min_t, min_chg, min_tex, sort_by, descending):
         return _table_rows(bundle, success_filter, min_t, min_chg, min_tex, sort_by, descending)
@@ -208,7 +209,7 @@ def build_app(args, model):
                                   inlier_mask=inlier_mask_i, matches_confs=nm['matches_confs'],
                                   title=f"neighbor #{i}")
 
-    def on_mesh_refresh(bundle, qid, match_state, pnp_state, highlight, show_query_on_prior):
+    def on_mesh_refresh(bundle, qid, match_state, pnp_state, highlight, show_query_on_prior, cam_size):
         if bundle is None:
             return None, None
         mesh_bundle = bundle['mesh_bundle']
@@ -232,11 +233,11 @@ def build_app(args, model):
         vmesh.export_subscan_glb(mesh_bundle['prior'], prior_path,
                                  highlight_ids=mesh_bundle['removed_ids'] if highlight else None,
                                  cam_poses=prior_cams, cam_colors=prior_colors, cam_images=prior_imgs,
-                                 cam_size=CAM_SIZE)
+                                 cam_size=cam_size)
         vmesh.export_subscan_glb(mesh_bundle['current'], current_path,
                                  highlight_ids=mesh_bundle['added_ids'] if highlight else None,
                                  cam_poses=current_cams, cam_colors=current_colors, cam_images=current_imgs,
-                                 cam_size=CAM_SIZE)
+                                 cam_size=cam_size)
         return prior_path, current_path
 
     with gr.Blocks(title='RIO10 Relocalization Debugger') as demo:
@@ -290,9 +291,10 @@ def build_app(args, model):
         with gr.Row():
             highlight_cb = gr.Checkbox(value=True, label='Highlight changed-instance vertices')
             show_query_on_prior_cb = gr.Checkbox(value=True, label='Also show query pose on prior mesh')
+            cam_size_slider = gr.Slider(0.05, 1.0, value=0.3, step=0.05, label='Camera frustum size (m)')
         with gr.Row():
-            prior_model3d = gr.Model3D(label='Prior (mapping scan)')
-            current_model3d = gr.Model3D(label='Current (rescan / query)')
+            prior_model3d = gr.Model3D(label='Prior (mapping scan)', height=600)
+            current_model3d = gr.Model3D(label='Current (rescan / query)', height=600)
 
         scene_inputs = [scene_dd, pairs_mode_dd, topk_slider]
         scene_or_mode_outputs = [scene_state, scene_msg, build_retrieval_btn, query_table,
@@ -321,9 +323,10 @@ def build_app(args, model):
 
         neighbor_gallery.select(on_neighbor_select, inputs=[match_state, pnp_state], outputs=match_plot_img)
 
-        mesh_inputs = [scene_state, query_state, match_state, pnp_state, highlight_cb, show_query_on_prior_cb]
+        mesh_inputs = [scene_state, query_state, match_state, pnp_state, highlight_cb,
+                      show_query_on_prior_cb, cam_size_slider]
         for trigger in [query_state.change, match_state.change, pnp_state.change,
-                       highlight_cb.change, show_query_on_prior_cb.change]:
+                       highlight_cb.change, show_query_on_prior_cb.change, cam_size_slider.change]:
             trigger(on_mesh_refresh, inputs=mesh_inputs, outputs=[prior_model3d, current_model3d])
 
     return demo

@@ -38,17 +38,27 @@ def load_texture_change_features(csv_path):
 
 def build_query_table(scene, all_query_ids, output_dir, texture_change):
     """ One row per query id: image_name, transl_err_m, angular_err_deg, success,
-    texture_lapvar (float or None), change_frac (float or None). """
+    texture_lapvar (float or None), change_frac (float or None).
+
+    transl_err_m/angular_err_deg/success are None (not inf/False) when this query has never been
+    bulk-run -- the viz tool must never require a prior bulk run to pick a query and hit "Run
+    matching" on it, and None vs. a known inf/failed result must stay distinguishable: inf/False
+    means "ran and failed", None means "hasn't been run at all yet, status unknown". """
     errors = load_raw_errors(output_dir, scene)
     rows = []
     for qid in all_query_ids:
-        t_err, a_err = errors.get(qid, (float('inf'), float('inf')))
+        err = errors.get(qid)
+        if err is None:
+            t_err, a_err, success = None, None, None
+        else:
+            t_err, a_err = err
+            success = t_err == t_err and t_err != float('inf')  # nan-safe isfinite
         tex, chg = texture_change.get((scene, qid), (None, None))
         rows.append({
             'image_name': qid,
             'transl_err_m': t_err,
             'angular_err_deg': a_err,
-            'success': t_err == t_err and t_err != float('inf'),  # nan-safe isfinite
+            'success': success,
             'texture_lapvar': tex,
             'change_frac': chg,
         })
@@ -58,18 +68,21 @@ def build_query_table(scene, all_query_ids, output_dir, texture_change):
 def filter_and_sort(table, success_filter=None, min_transl_err=None, min_change_frac=None,
                     min_texture=None, sort_by='transl_err_m', descending=True, limit=200):
     """
-    success_filter: None (no filter), 'success', or 'failed'.
-    min_* filters keep only rows with that field >= the threshold (None-valued fields are
-    excluded by a non-None min_* filter, since there's nothing to compare).
+    success_filter: None/'any' (no filter -- includes never-run queries too), 'success', or
+    'failed' (the latter two only match queries that have actually been run; a never-run query's
+    success is None, which is neither).
+    min_* filters keep only rows with that field >= the threshold (None-valued fields -- either
+    never computed, or never run -- are excluded by a non-None min_* filter, since there's
+    nothing to compare).
     sort_by: one of the row keys in build_query_table's output.
     """
     rows = table
     if success_filter == 'success':
-        rows = [r for r in rows if r['success']]
+        rows = [r for r in rows if r['success'] is True]
     elif success_filter == 'failed':
-        rows = [r for r in rows if not r['success']]
+        rows = [r for r in rows if r['success'] is False]
     if min_transl_err is not None:
-        rows = [r for r in rows if r['transl_err_m'] != float('inf') and r['transl_err_m'] >= min_transl_err]
+        rows = [r for r in rows if r['transl_err_m'] is not None and r['transl_err_m'] >= min_transl_err]
     if min_change_frac is not None:
         rows = [r for r in rows if r['change_frac'] is not None and r['change_frac'] >= min_change_frac]
     if min_texture is not None:
